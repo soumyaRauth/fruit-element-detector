@@ -1,17 +1,34 @@
 import { NextResponse } from 'next/server';
 import * as tf from '@tensorflow/tfjs-node';
 
+const FRUIT_TYPES = [
+  'apple',
+  'banana',
+  'orange',
+  'grape',
+  'strawberry',
+  'mango',
+  'pear',
+  'peach',
+];
+
 let model: tf.LayersModel | null = null;
 
 async function loadModel() {
   try {
-    // Load the model from the saved path
-    // We'll need to implement model saving in the training interface
-    model = await tf.loadLayersModel('file://./model/model.json');
+    // Try to load the model from IndexedDB first
+    model = await tf.loadLayersModel('indexeddb://toxic-detection-model');
     return true;
   } catch (error) {
-    console.error('Failed to load model:', error);
-    return false;
+    console.error('Failed to load model from IndexedDB:', error);
+    try {
+      // Fallback to loading from file system
+      model = await tf.loadLayersModel('file://./model/model.json');
+      return true;
+    } catch (error) {
+      console.error('Failed to load model from file system:', error);
+      return false;
+    }
   }
 }
 
@@ -58,25 +75,44 @@ export async function POST(request: Request) {
     // Preprocess image
     const inputTensor = await preprocessImage(buffer);
     // Make prediction
-    const prediction = await model!.predict(inputTensor.expandDims(0)) as tf.Tensor;
-    const probability = (await prediction.data())[0];
+    const predictions = await model!.predict(inputTensor.expandDims(0), {
+      batchSize: 1,
+    }) as tf.Tensor[];
+    
+    const [fruitTypePrediction, toxicityPrediction] = predictions;
+
+    // Get prediction probabilities
+    const fruitTypeProbs = await fruitTypePrediction.data();
+    const toxicityProb = (await toxicityPrediction.data())[0];
+
+    // Find the most likely fruit type
+    const maxProbIndex = fruitTypeProbs.indexOf(Math.max(...Array.from(fruitTypeProbs)));
+    const predictedFruit = FRUIT_TYPES[maxProbIndex];
+    const fruitConfidence = fruitTypeProbs[maxProbIndex];
     
     // Cleanup
     inputTensor.dispose();
-    prediction.dispose();
+    fruitTypePrediction.dispose();
+    toxicityPrediction.dispose();
 
     // Prepare detailed analysis
     const analysis = {
-      result: probability > 0.5 ? 'toxic' : 'non-toxic',
-      confidence: probability > 0.5 ? probability : 1 - probability,
-      details: {
-        toxicProbability: probability,
-        safetyLevel: probability > 0.8 ? 'High Risk' : 
-                     probability > 0.5 ? 'Moderate Risk' : 
-                     probability < 0.2 ? 'Very Safe' : 'Safe',
-        recommendation: probability > 0.5 
-          ? 'This fruit may contain toxic chemicals. Not recommended for consumption.'
-          : 'This fruit appears safe for consumption.',
+      fruitType: {
+        prediction: predictedFruit,
+        confidence: fruitConfidence,
+      },
+      toxicity: {
+        result: toxicityProb > 0.5 ? 'toxic' : 'non-toxic',
+        confidence: toxicityProb > 0.5 ? toxicityProb : 1 - toxicityProb,
+        details: {
+          toxicProbability: toxicityProb,
+          safetyLevel: toxicityProb > 0.8 ? 'High Risk' : 
+                       toxicityProb > 0.5 ? 'Moderate Risk' : 
+                       toxicityProb < 0.2 ? 'Very Safe' : 'Safe',
+          recommendation: toxicityProb > 0.5 
+            ? 'This fruit may contain toxic chemicals. Not recommended for consumption.'
+            : 'This fruit appears safe for consumption.',
+        }
       },
       analysis_time: new Date().toISOString()
     };
